@@ -271,7 +271,10 @@ class Parser:
                 if itm is not None:
                     out_data[sender]['imports'].append(itm)
 
-        return out_data.values()
+        out = []
+        for o in self.groups['order']:
+            out.append(out_data[o])
+        return out
 
     def get_order_data(self):
         out_data = {}
@@ -317,12 +320,14 @@ class Parser:
     def read_groups(self, file_name):
         groups = []
         nodes = {}
+        order = []
         with open(file_name, 'r') as f:
             line = f.readline().rstrip('\n')
 
             while line:
                 split = line.split(" ")
                 group_name = split.pop(0)
+                order.append(group_name)
                 groups.append({'group_name': group_name, 'nodes': split})
                 for n in split:
                     nodes[n] = group_name
@@ -332,6 +337,7 @@ class Parser:
         self.groups = {
             'groups': groups,
             'nodes': nodes,
+            'order': order,
             'data': None,
             'duplex': None,
             'max': 0
@@ -352,6 +358,7 @@ class Parser:
         group_data = {}
         group_duplex = {}
         max_len = 0
+
         for sender in self.lengthStat.data:
             for recver in self.lengthStat.data[sender]:
                 sender_group = self.groups['nodes'][sender]
@@ -367,6 +374,7 @@ class Parser:
 
                 if max_len < group_data[sender_group][recver_group]['len']:
                     max_len = group_data[sender_group][recver_group]['len']
+
                 group_duplex[sender_group + '-' + recver_group] = None
                 if recver_group + '-' + sender_group in group_duplex:
                     group_duplex[recver_group + '-' + sender_group] = recver_group
