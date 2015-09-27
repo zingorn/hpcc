@@ -23,7 +23,7 @@ class Parser:
         self.options = options
         self.format = options.format
         self.cacheFile = options.cache
-        self.groups = {}
+        self.groups = None
 
     def print_progress(self, time):
         sys.stdout.write(chr(13) + "{0}{1:9.3f}%".format(datetime.datetime.now().ctime(),
@@ -217,6 +217,27 @@ class Parser:
             'duplex': duplex
         }
 
+    def get_group_data_item_to_print(self, sender, recver):
+        duplex_list = self.groups['duplex']
+        if sender + '-' + recver in duplex_list and duplex_list[sender + '-' + recver] == sender:
+            duplex = 1
+        else:
+            if recver + '-' + sender in duplex_list and duplex_list[recver + '-' + sender] == recver:
+                duplex = 2
+            else:
+                duplex = 0
+
+        if hasattr(self.options, 'percent') and self.options.percent is not None \
+                and self.groups['data'][sender][recver]['pMax'] < float(self.options.percent):
+            return None
+
+        print sender, recver, self.groups['data'][sender][recver]['pMax']
+        return {
+            'name': recver,
+            'stat': self.groups['data'][sender][recver],
+            'duplex': duplex
+        }
+
     def get_sorter_data(self):
         out_data = {}
 
@@ -226,6 +247,27 @@ class Parser:
                 if sender not in out_data:
                     out_data[sender] = {'imports': [], 'label': sender, 'name': sender}
                 itm = self.get_data_item_to_print(sender, recver)
+                if itm is not None:
+                    out_data[sender]['imports'].append(itm)
+
+        return out_data.values()
+
+    def get_smart_order_data(self):
+        # normalize
+
+        for sender in self.groups['data']:
+            for receiver in self.groups['data'][sender]:
+                p_max = round(100 * self.groups['data'][sender][receiver]['len'] / self.groups['max'], 3)
+                self.groups['data'][sender][receiver]['pMax'] = p_max
+
+        out_data = {}
+
+        for sender in self.groups['data']:
+            for recver in self.groups['data'][sender]:
+                if sender not in out_data:
+                    out_data[sender] = {'imports': [], 'label': sender, 'name': sender}
+                itm = self.get_group_data_item_to_print(sender, recver)
+
                 if itm is not None:
                     out_data[sender]['imports'].append(itm)
 
@@ -256,6 +298,8 @@ class Parser:
         self.lengthStat.normalize()
         if hasattr(self.options, 'order') and self.options.order is not None:
             out_data = self.get_order_data()
+        elif hasattr(self.options, 'smart_order') and self.options.smart_order is not None:
+            out_data = self.get_smart_order_data()
         else:
             out_data = self.get_sorter_data()
 
@@ -270,15 +314,10 @@ class Parser:
                 f2.write(content.replace('%json%', json.dumps(out_data)).replace('%function_name%',
                                                                                  ','.join(functionName)))
 
-    def order(self):
-        if self.options.order is None or not os.path.exists(self.options.order):
-            print "Order file not specified"
-            sys.exit()
-
-        self.parse()
+    def read_groups(self, file_name):
         groups = []
         nodes = {}
-        with open(self.options.order, 'r') as f:
+        with open(file_name, 'r') as f:
             line = f.readline().rstrip('\n')
 
             while line:
@@ -292,8 +331,49 @@ class Parser:
 
         self.groups = {
             'groups': groups,
-            'nodes': nodes
+            'nodes': nodes,
+            'data': None,
+            'duplex': None,
+            'max': 0
         }
+
+    def order(self):
+        if self.options.order is None or not os.path.exists(self.options.order):
+            print "Order file not specified"
+            sys.exit()
+
+        self.read_groups(self.options.order)
+        self.parse()
+        self.to_print()
+
+    def smart_order(self):
+        self.read_groups(self.options.smart_order)
+        self.parse()
+        group_data = {}
+        group_duplex = {}
+        max_len = 0
+        for sender in self.lengthStat.data:
+            for recver in self.lengthStat.data[sender]:
+                sender_group = self.groups['nodes'][sender]
+                recver_group = self.groups['nodes'][recver]
+
+                if sender_group not in group_data:
+                    group_data[sender_group] = {recver_group: {'len': 0}}
+
+                if recver_group not in group_data[sender_group]:
+                    group_data[sender_group][recver_group] = {'len': 0}
+
+                group_data[sender_group][recver_group]['len'] += self.lengthStat.data[sender][recver]['len']
+
+                if max_len < group_data[sender_group][recver_group]['len']:
+                    max_len = group_data[sender_group][recver_group]['len']
+                group_duplex[sender_group + '-' + recver_group] = None
+                if recver_group + '-' + sender_group in group_duplex:
+                    group_duplex[recver_group + '-' + sender_group] = recver_group
+        self.groups['data'] = group_data
+        self.groups['max'] = max_len
+
+        self.groups['duplex'] = group_duplex
         self.to_print()
 
     def matrix(self):

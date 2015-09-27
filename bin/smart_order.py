@@ -51,9 +51,9 @@ def main():
                                 dest="max_node",
                                 help="")
 
-    collection_group.add_option("--order",
+    collection_group.add_option("--smart-order",
                                 metavar="ITERATION",
-                                dest="order",
+                                dest="smart_order",
                                 help="")
 
     parser.add_option_group(collection_group)
@@ -76,7 +76,7 @@ def main():
 
     parser = Parser(info, options)
     print datetime.datetime.now().ctime() + ' Start'
-    parser.order()
+    parser.smart_order()
     print "\n" + datetime.datetime.now().ctime() + ' End'
     return 0
 
