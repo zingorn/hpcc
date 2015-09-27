@@ -1,0 +1,88 @@
+
+<!DOCTYPE html>
+<html>
+<meta charset="utf-8">
+<style>
+
+    body {
+        font: 10px sans-serif;
+        shape-rendering: crispEdges;
+    }
+
+    .block{
+        fill: #fff;
+        stroke: #ccc;
+    }
+
+    .q10-11{fill:rgb(165,0,38)}
+    .q9-11{fill:rgb(215,48,39)}
+    .q8-11{fill:rgb(244,109,67)}
+    .q7-11{fill:rgb(253,174,97)}
+    .q6-11{fill:rgb(254,224,139)}
+    .q5-11{fill:rgb(255,255,191)}
+    .q4-11{fill:rgb(217,239,139)}
+    .q3-11{fill:rgb(166,217,106)}
+    .q2-11{fill:rgb(102,189,99)}
+    .q1-11{fill:rgb(26,152,80)}
+    .q0-11{fill:rgb(0,104,55)}
+
+</style>
+<body>
+<script src="https://code.jquery.com/jquery-1.11.3.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/3.5.5/d3.min.js"></script>
+<script>
+    var data = %json%;
+
+    var width = 850,
+            height = 136,
+            cellSize = 17; // cell size
+
+    var svg = d3.select("body").selectAll("svg")
+            .data([1])
+            .enter().append("svg")
+            .attr("width", width + 1)
+            .attr("height", data.length/50 *17 + 1)
+            .append("g");
+
+    svg.append("text")
+            .attr("transform", "translate(-6," + cellSize * 3.5 + ")rotate(-90)")
+            .style("text-anchor", "middle")
+            .text(function(d) { return d; });
+
+    var rect = svg.selectAll(".day")
+                    .data(function(d) { return d3.range(0, data.length); })
+                    .enter().append("rect")
+                    .attr("class", "block")
+                    .attr("width", cellSize)
+                    .attr("height", cellSize)
+                    .attr("x", function(d) { return (d % 50) * cellSize; })
+                    .attr("y", function(d) { return Math.floor(d / 50) * cellSize; })
+            ;
+
+    rect.append("title")
+            .text(function(d) { return d; });
+
+    $(function(){
+
+        var t;
+        function update(type, value){
+            var c = data;
+            rect
+                    .filter(function(d) { return c[d][type] != undefined})
+                    .attr("class", function(d) {
+                        var t = (c[d][type] != undefined) ? Math.ceil(c[d][type][value] / 10) : 0;
+                        return "block q" + t + '-11';
+                    })
+                    .select("title")
+                    .text(function(d) {return d + ': ' + (c[d][type] != undefined ? c[d][type][value] : 0); });
+        }
+        $('.switcher').click(function(e){
+            update($('input[name=type]:checked').data('type'), $('input[name=value]:checked').data('value'));
+        });
+        $('.switcher:eq(0)').trigger('click');
+    });
+</script>
+<label><input type="radio" name="type" class="switcher" data-type="byFunc" checked="checked"/>By function</label>&nbsp;<label><input type="radio" name="type" class="switcher" data-type="byTotal">By total value</label>|<label><input type="radio" name="value" class="switcher" data-value="count" checked="checked">Count</label>&nbsp;<label><input type="radio" name="value" class="switcher" data-value="len">Length</label>
+<div id="map"></div>
+</body>
+</html>

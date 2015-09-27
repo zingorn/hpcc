@@ -1,0 +1,466 @@
+#!/bin/env php
+<?php
+
+echo "Script has deprecated. Use d3convert.<some_type>.";
+die;
+ini_set('memory_limit', '2G');
+define('ITAC_STFTOOL', '/common/intel/itac/8.1.4.045/bin/xstftool');
+define('D3_WRAPPERS_PATH', '/home/udigo/runs/bin/d3/');
+define('D3_WRAPPER', '.d3wrapper.html');
+//define('MPI_FUNC', 'MPI:MPI_Recv');
+define('ITAC_SENDMSG', 'SENDMSG');
+define('ITAC_RECVMSG', 'RECVMSG');
+
+$opt = getopt('', array(
+    'file:',
+    'out:',
+    'stats',
+    'full',
+    'blockSize::',
+    'blocks::',
+    'func:',
+    'type:',
+    'cache',
+));
+
+if (count($opt) < 2) {
+    usage('Skip arguments.');
+    exit(1);
+}
+
+if (!isset($opt['func'])) {
+    usage('Skip "--func" argument.');
+}
+if (!isset($opt['file'])) {
+    usage('Skip "--file" argument.');
+    exit(1);
+}
+
+
+$stfFile = $opt['file'];
+$stfParam = 'size';
+
+// get functions
+$head = shell_exec(sprintf('%s %s --print-statistics --convert - 2>/dev/null', ITAC_STFTOOL, $stfFile));
+
+$head = array_filter(explode("\n", $head));
+$funcs = array();
+$totalDuration = 0;
+
+foreach ($head as $h) {
+    if (preg_match('/^DURATION\s+\d+\s+(\d+)/', $h, $m)) {
+        //'3559194624000'
+        $totalDuration = $m[1];
+        continue;
+    }
+    if (!preg_match('/(\d+)[^"]+\"([^"]+)/', $h, $m)) continue;
+    $funcs[$m[2]] = $m[1];
+    $funcs[$m[1]] = $m[2];
+}
+if (!array_key_exists($opt['func'], $funcs)) {
+    usage($opt['func'] . ' not found in functions list.');
+}
+
+
+//if (isset($opt['stats'])) {
+//    $p = createProcess($stfFile, '--print-statistics', $pipes);
+//    $stats = array(
+//        'TIMING' => array(),
+//        'ONE2ONE_PROFILE' => array()
+//    );
+//    $data = array();
+//    while ($line = stream_get_line($pipes[1], 0, "\n")) {
+//        if (substr($line, 0, 1) === '#') continue;
+//        if (!preg_match('/ONE2ONE_PROFILE\s+(.*)$/', $line, $m)) continue;
+//
+//        list($sender, $receiver, $senderFunc, $receiverFunc, , , $size, $count, $min_time, $max_time, $total_time) = explode(':', $m[1]);
+//
+////	var_dump($line,$sender, $receiver,$size, $count, $min_time, $max_time, $total_time);die;
+//        if (!in_array($mpiFunc, array($senderFunc, $receiverFunc))) continue;
+//        /*        if ($senderFunc === $mpiFunc) {
+//        //	    $stats['ONE2ONE_PROFILE'][$sender] = array('name' => $sender, 'imports' => );
+//            } else {
+//                $stats['ONE2ONE_PROFILE'][$] = array('name' => $sender, 'imports' => );
+//            }*/
+//        if (!isset($stats['ONE2ONE_PROFILE'][$sender])) $stats['ONE2ONE_PROFILE'][$sender] = array('name' => $sender, 'imports' => array());
+//        if (!in_array($receiver, $stats['ONE2ONE_PROFILE'][$sender]['imports'])) {
+//            $stats['ONE2ONE_PROFILE'][$sender]['imports'][] = $receiver;
+//        }
+////
+//    }
+//    fclose($pipes[1]);
+//    proc_close($p);
+//    $data = array_values($stats['ONE2ONE_PROFILE']);
+//    saveFile($data);
+//}
+
+$st = array('from' => array(), 'func' => array(), 'to' => array());
+$options = array(
+    'file' => $stfFile,
+    'totalDuration' => $totalDuration,
+    'opt' => $opt
+);
+full($options);
+
+exit(0);
+
+
+function usage($reason)
+{
+    echo sprintf("%s\n%s --file <stf file> --type=<blocks|radial> --func=<function name> [options]\n" .
+        "\t--file=<filename>\t\tPath to STF file\n" .
+        "\t--type\t\t\t\tRect-type or radial-type diagram\n" .
+        "\t--func=<function name>\t\tFunction name (e.i. MPI:MPI_Send)\n" .
+        "\n" .
+        "Options:\n" .
+        "\t--out=<filename>\t\tOutput file\n" .
+        "\t--blocks=<number>\t\tNumber of blocks\n" .
+        "\n",
+        $reason, basename(__FILE__));
+    exit(1);
+}
+
+function full($options)
+{
+    $stfFile = $options['file'];
+    $totalDuration = $options['totalDuration'];
+    $opt = $options['opt'];
+
+    $firstBlock = false;
+    $blockSize = isset($opt['blockSize']) ? (float)$opt['blockSize'] : null;
+    $blocksNumber = isset($opt['blocks']) ? (int)$opt['blocks'] : null;
+    $blockNextTime = 0;
+
+    $allowCmd = array(ITAC_RECVMSG, ITAC_SENDMSG);
+    $duplex = array();
+
+    if (file_exists('.d3convert.cache')) {
+        $data = json_decode(file_get_contents('.d3convert.cache'), true);
+    } else {
+        $data = array(
+            'functions' => array('_statistic' => array('len' => 0, 'count' => 0, 'totalCount' => 0, 'totalLen' => 0),),
+            'blocks' => array('_statistic' => array('len' => 0, 'count' => 0, 'totalCount' => 0, 'totalLen' => 0),)
+        );
+        $defBlock = $currentBlock = array('_statistic' => array('len' => 0, 'count' => 0, 'totalCount' => 0, 'totalLen' => 0));
+
+
+        $p = createProcess($stfFile, '--convert -', $pipes);
+        $from = $to = $len = $func = null;
+        $blockInd = 0;
+        while ($line = stream_get_line($pipes[1], 0, "\n")) {
+            if (preg_match('/^(\d+)\s+([^\s]+)\s+(.*)$/', $line, $l)) {
+                list(,$time, $cmd, $args) = $l;
+
+                // has read first line with Time
+                if ($firstBlock === false) {
+                    $firstBlock = true;
+                    if ($blocksNumber !== null) {
+                        $blockSize = ($totalDuration - $time) / $blocksNumber;
+                        echo sprintf("SET BLOCK SIZE TO %.2f\n", $blockSize);
+                    } else if ($blockSize !== null){
+                        $blocksNumber = ceil(($totalDuration - $time) / $blockSize);
+                        echo sprintf("SET BLOCK NUMBER TO %d\n", $blocksNumber);
+                    }
+                    $blockNextTime = $time + $blockSize;
+                }
+                echo sprintf(chr(13) . '%3s%%', ceil(100 * $time / $totalDuration));
+
+                if (in_array($cmd, $allowCmd)) {
+                    // parse SEND message
+                    if (preg_match('/FROM\s+([^\s]+)\s+TO\s+([^\s]+)\s+LEN\s+([^\s]+)\s+FUNCTION\s+(.*)$/', $args, $m)) {
+                        list(,$from, $to, $len, $func) = $m;
+                    }
+                    // parse RECV message
+                    if (preg_match('/BY\s+([^\s]+)\s+FROM\s+([^\s]+)\s+LEN\s+([^\s]+)\s+FUNCTION\s+(.*)$/', $args, $m)) {
+                        list(,$from, $to, $len, $func) = $m;
+                    }
+
+                    $func = str_replace('"', '', $func);
+                    if (!isset($data['functions'][$func])) $data['functions'][$func] = array();
+                    if (!isset($data['functions'][$func][$from])) $data['functions'][$func][$from] = array();
+                    if (!isset($data['functions'][$func][$from][$to])) $data['functions'][$func][$from][$to] = array(
+                        'len' => 0,
+                        'count' => 0
+                    );
+
+                    if (!isset($currentBlock[$func])) $currentBlock[$func] = array('len' => 0, 'count' => 0);
+                    if (!isset($currentBlock[$func][$from])) $currentBlock[$func][$from] = array();
+                    if (!isset($currentBlock[$func][$from][$to])) $currentBlock[$func][$from][$to] = array(
+                        'len' => 0,
+                        'count' => 0
+                    );
+
+                    // for count collection
+                    $data['functions'][$func][$from][$to]['count']++;
+                    $data['functions'][$func][$from][$to]['len'] += $len;
+                    $data['functions']['_statistic']['totalCount']++;
+                    $data['functions']['_statistic']['totalLen'] += $len;
+                    $currentBlock[$func][$from][$to]['count']++;
+                    $currentBlock[$func][$from][$to]['len'] += $len;
+                    $currentBlock[$func]['count']++;
+                    $currentBlock[$func]['len'] += $len;
+                    $currentBlock['_statistic']['count']++;
+                    $currentBlock['_statistic']['len']+=$len;
+                    $data['blocks']['_statistic']['count']++;
+                    $data['blocks']['_statistic']['len'] += $len;
+                    if ($data['functions']['_statistic']['count'] < $data['functions'][$func][$from][$to]['count']) {
+                        $data['functions']['_statistic']['count'] = $data['functions'][$func][$from][$to]['count'];
+                    }
+                    if ($data['functions']['_statistic']['len'] < $data['functions'][$func][$from][$to]['len']) {
+                        $data['functions']['_statistic']['len'] = $data['functions'][$func][$from][$to]['len'];
+                    }
+                    if ($currentBlock['_statistic']['count'] < $currentBlock[$func][$from][$to]['count']) {
+                        $currentBlock['_statistic']['count'] = $currentBlock[$func][$from][$to]['count'];
+                    }
+                    if ($currentBlock['_statistic']['len'] < $currentBlock[$func][$from][$to]['len']) {
+                        $currentBlock['_statistic']['len'] = $currentBlock[$func][$from][$to]['len'];
+                    }
+
+                    if (!isset($data['functions']['_statistic'][$func]['count'][$from])) $data['functions']['_statistic'][$func]['count'][$from] = 0;
+                    if (!isset($data['functions']['_statistic'][$func]['count'][$to])) $data['functions']['_statistic'][$func]['count'][$to] = 0;
+                    if (!isset($data['functions']['_statistic'][$func]['len'][$from])) $data['functions']['_statistic'][$func]['len'][$from] = 0;
+                    if (!isset($data['functions']['_statistic'][$func]['len'][$to])) $data['functions']['_statistic'][$func]['len'][$to] = 0;
+                    $data['functions']['_statistic'][$func]['count'][$to]++;
+                    $data['functions']['_statistic'][$func]['count'][$from]++;
+                    $data['functions']['_statistic'][$func]['len'][$to]+=$len;
+                    $data['functions']['_statistic'][$func]['len'][$from]+=$len;
+//
+                    if (!isset($data['blocks']['_statistic'][$func])) $data['blocks']['_statistic'][$func] = array('count' => 0, 'len' => 0);
+//                    if ($data['blocks']['_statistic'][$func]['count'] < $currentBlock[$func]['count']) {
+//                        $data['blocks']['_statistic'][$func]['count']= $currentBlock[$func]['count'];
+//                    }
+//                    if ($data['blocks']['_statistic'][$func]['len'] < $currentBlock[$func]['len']) {
+//                        $data['blocks']['_statistic'][$func]['len'] = $currentBlock[$func]['len'];
+//                    }
+                    $data['blocks']['_statistic'][$func]['count']++;
+                    $data['blocks']['_statistic'][$func]['len']+=$len;
+
+                    $duplex["$from-$to"] = null;
+                    if (array_key_exists("$to-$from", $duplex)) {
+                        $duplex["$to-$from"] = $to;
+                    }
+
+                    // for blocks collection
+                    if ($opt['type'] === 'block' && $time > $blockNextTime) {
+                        $cnt = $blockNextTime / $blockSize - count($data['blocks']) + 1;
+                        for ($i = $cnt; $i >= 1; $i--) {
+                            $data['blocks'][] = $defBlock;
+                        }
+
+                        // flush info
+                        $data['blocks'][] = $currentBlock;
+                        $currentBlock = $defBlock;
+                        $blockNextTime = $time + $blockSize;
+                    }
+                }
+            }
+        }
+
+        if (count($data['blocks']) - 1 != $blocksNumber) {
+            $cnt = $blocksNumber - count($data['blocks']) + 1;
+            for ($i = $cnt; $i >= 1; $i--) {
+                $data['blocks'][] = $defBlock;
+            }
+        }
+
+        $data['functions']['_statistic']['duplex'] = array_keys(array_filter($duplex, function($v){
+            return $v !== null;
+        }));
+        if (isset($opt['cache'])) {
+            file_put_contents('.d3convert.cache', json_encode($data));
+        }
+
+        fclose($pipes[1]);
+        proc_close($p);
+    }
+
+    // prepare data
+    saveFile(hydrate(normalize($data), $opt));
+}
+
+function createProcess($file, $cmd, &$pipes)
+{
+    // get stats
+    $cmd = sprintf('%s %s %s', ITAC_STFTOOL, $file, $cmd);
+    $cwd = getcwd();
+    $env = array();
+    $p = proc_open($cmd, array(
+        1 => array('pipe', 'w'),
+    ), $pipes, $cwd, $env);
+
+    if (!is_resource($p)) {
+        echo "Can't run stftool.\n";
+        exit(1);
+    }
+    return $p;
+}
+
+/**
+ * @param array $data
+ * @return void
+ */
+function saveFile($data)
+{
+    global $opt;
+
+    $template = file_get_contents(D3_WRAPPERS_PATH . $opt['type'] . D3_WRAPPER);
+
+    $outFile = isset($opt['out']) ? $opt['out'] : D3_WRAPPER . time();
+    file_put_contents($outFile . '.html', str_replace('%json%', json_encode($data), $template));
+}
+
+/**
+ * @param array $data
+ * @return array
+ */
+function hydrate($data)
+{
+    global $opt;
+    $out = array();
+    $funcName = $opt['func'];
+
+    switch($opt['type']) {
+        case 'blocks':
+            foreach ($data['blocks'] as $bData) {
+                $a = array();
+                foreach ($bData as $key => $fData) {
+                    if ($funcName != $key) {
+                        $a = $fData;
+                        break;
+                    }
+                }
+                $out[] = $a;
+            }
+            break;
+
+        case 'radial':
+            $top = current($data['functions']);
+
+            //foreach ($data['functions']['_statistic'][$funcName]['len'] as $sender => $st) {
+              //  $senderRow= $data['functions'][$funcName][$sender];
+                foreach ($data['functions'][$funcName] as $sender => $senderRow) {
+                    foreach ($senderRow as $receiver => $receiverRow) {
+                        if (!isset($out[$sender])) $out[$sender] = array('name' => $sender, 'label'=> 'node ' . $sender,'imports' => array());
+                        $out[$sender]['imports'][] = array(
+                            'name' => $receiver,
+                            'stat' => $receiverRow
+                        );
+                    }
+                }
+            //}
+
+            break;
+    }
+
+    return array_values($out);
+}
+
+/**
+ * Data struct
+ * [
+ *  'blocks' => [
+ *      ...
+ *      // block #N
+ *      [
+ *          'funcName' => [
+ *              ...
+ *              'target_sender' =>
+ *                  ...
+ *                  [
+ *                   'destination_receiver' => ['cnt' =>, 'size' =>]
+ *                  ]
+ *              ]
+ *          ]
+ *      ]
+ *  ],
+ *  'functions' => [
+ *      'funcName'=> [
+ *          ...
+ *          'target_sender' =>
+ *              ...
+ *              [
+ *                  'destination_receiver' => ['cnt' =>, 'size' =>]
+ *              ]
+ *          ]
+ *      ]
+ *  ]
+ * @param array $data
+ * @return array
+ */
+function normalize($data)
+{
+    global $opt;
+    $maxLen = $data['functions']['_statistic']['len'];
+    $totalLen = $data['functions']['_statistic']['totalLen'];
+    $maxCount = $data['functions']['_statistic']['count'];
+    $totalCount = $data['functions']['_statistic']['totalCount'];
+    $duplexList = $data['functions']['_statistic']['duplex'];
+    $optFuncName = $opt['func'];
+
+    $funcOut = array();
+    // functions
+
+    arsort($data['functions']['_statistic'][$optFuncName]['len']);
+    foreach ($data['functions'] as $funcName => $func) {
+        if (substr($funcName, 0, 1) === '_') continue;
+        if (!isset($funcOut[$funcName]))  $funcOut[$funcName] = array();
+        //foreach ($func as $sender => $senderRow) {
+
+        foreach($data['functions']['_statistic'][$optFuncName]['len'] as $sender => $st) {
+            if (substr($funcName, 0, 1) === '_' || !isset($func[$sender])) continue;
+            $senderRow = $func[$sender];
+            if (!isset($funcOut[$funcName][$sender]))  $funcOut[$funcName][$sender] = array();
+            foreach ($senderRow as $receiver => $receiverRow) {
+                // 1 -
+                $duplex = (array_key_exists("$sender-$receiver", $duplexList) && $sender == $duplexList["$sender-$receiver"])
+                    ? 1
+                    : (array_key_exists("$receiver-$sender", $duplexList) && $sender == $duplexList["$receiver-$sender"])
+                        ? 2
+                        : 0;
+                $funcOut[$funcName][$sender][$receiver] = array(
+                    //'pref' => round(100*$st/$maxLen, 3),
+                    'count' => round(100 * $receiverRow['count'] / $maxCount, 3),
+                    'len' => round(100 * $receiverRow['len'] / $maxLen, 3),
+                    'duplex' => $duplex
+                );
+            }
+        }
+    }
+
+
+    // blocks
+    $blocOut = array();
+    $maxLen = $data['blocks']['_statistic']['len'];
+    $maxCount = $data['blocks']['_statistic']['count'];
+
+    foreach ($data['blocks'] as $blockName => $block) {
+        if (substr($blockName, 0, 1) === '_') continue;
+        $blockFOut = array();
+
+        foreach ($block as $funcName => $func) {
+            if (substr($funcName, 0, 1) === '_') continue;
+
+            $funcMaxLen = $data['blocks']['_statistic'][$funcName]['len'];
+            $funcMaxCount = $data['blocks']['_statistic'][$funcName]['count'];
+            $fnameArr = array();
+
+            $blockFOut[$funcName] = array(
+                'byTotal' => array(
+                    'count' => $maxCount == 0 ? 0 :round(100 * $func['count'] / $maxCount, 3),
+                    'len' => $maxLen == 0 ? 0 : round(100 * $func['len'] / $maxLen, 3),
+                ),
+                'byFunc' => array(
+                    'count' => $funcMaxCount == 0 ? 0 : round(100 * $func['count'] / $funcMaxCount, 3),
+                    'len' => $funcMaxLen == 0 ? 0 : round(100 * $func['len'] / $funcMaxLen, 3),
+                )
+            );
+            //$blocOut[$funcName] = $fnameArr;
+        }
+        $blocOut[$blockName] = $blockFOut;
+    }
+
+    return array(
+        'functions' => $funcOut,
+        'blocks' => $blocOut
+    );
+}

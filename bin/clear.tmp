@@ -1,0 +1,12 @@
+#!/bin/bash
+
+ssh node1 df /tmp
+echo "ssh node1 rm -f /tmp/clog2*"
+ssh node1 rm -f /tmp/clog2*
+
+for i in {33..47}
+do
+  ssh node$i df /tmp
+  echo "ssh node$i rm -f /tmp/clog2*"
+  ssh node$i rm -f /tmp/clog2*
+done

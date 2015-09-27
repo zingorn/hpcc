@@ -1,0 +1,396 @@
+#!/bin/env php
+<?php
+ini_set('memory_limit', '32G');
+ini_set('output_buffering', 'on');
+ini_set('date.timezone', 'Europe/Moscow');
+define('ITAC_STFTOOL', '/common/intel/itac/8.1.4.045/bin/xstftool');
+define('D3_WRAPPERS_PATH', '/home/udigo/runs/bin/d3/');
+define('D3_WRAPPER', '.d3wrapper.html');
+//define('MPI_FUNC', 'MPI:MPI_Recv');
+define('ITAC_SENDMSG', 'SENDMSG');
+define('ITAC_RECVMSG', 'RECVMSG');
+define('ITAC_GLOBALOP', 'GLOBALOP');
+
+$opt = getopt('', array(
+    'file:',
+    'out:',
+    'func:',
+    'cache:',
+));
+
+if (count($opt) < 2) {
+    usage('Skip arguments.');
+    exit(1);
+}
+
+if (!isset($opt['func'])) {
+    usage('Skip "--func" argument.');
+}
+if (!isset($opt['file'])) {
+    usage('Skip "--file" argument.');
+    exit(1);
+}
+if (isset($opt['cache']) && !is_string($opt['cache'])) {
+    usage('Skip "--cache" argument.');
+    exit(1);
+}
+
+$stfFile = $opt['file'];
+$stfParam = 'size';
+
+// get functions
+$head = shell_exec(sprintf('%s %s --print-statistics --convert - 2>/dev/null', ITAC_STFTOOL, $stfFile));
+
+$head = array_filter(explode("\n", $head));
+$funcs = array();
+$totalDuration = 0;
+
+foreach ($head as $h) {
+    if (preg_match('/^DURATION\s+\d+\s+(\d+)/', $h, $m)) {
+        //'3559194624000'
+        $totalDuration = $m[1];
+        continue;
+    }
+    if (!preg_match('/(\d+)[^"]+\"([^"]+)/', $h, $m)) continue;
+    $funcs[$m[2]] = $m[1];
+    $funcs[$m[1]] = $m[2];
+}
+if ($opt['func'] != 'GLOBALOP' && !array_key_exists($opt['func'], $funcs)) {
+    usage($opt['func'] . ' not found in functions list.');
+}
+
+$st = array('from' => array(), 'func' => array(), 'to' => array());
+$options = array(
+    'file' => $stfFile,
+    'totalDuration' => $totalDuration,
+    'opt' => $opt
+);
+
+
+if (!isset($opt['cache']) ||
+    (isset($opt['cache']) && !file_exists($opt['cache']))
+) {
+    $options['cache'] = $opt['cache'];
+    unset($opt['cache']);
+    echo "Cache file {$options['cache']} not found. Created {$options['cache']}.\n";
+}
+echo sprintf("\n%s Start\n", date('c'));
+full($options);
+echo sprintf("\n%s End\n", date('c'));
+exit(0);
+
+
+function usage($reason)
+{
+    echo sprintf("%s\n%s --file <stf file> --func=<function name> [options]\n" .
+        "\t--file=<filename>\t\tPath to STF file\n" .
+        "\t--func=<function name>\t\tFunction name (e.i. MPI:MPI_Send)\n" .
+        "\n" .
+        "Options:\n" .
+        "\t--out=<filename>\t\tOutput file\n" .
+        "\t--cache=<filename>\tUse cache file\n" .
+        "\n",
+        $reason, basename(__FILE__));
+    exit(1);
+}
+
+function filterSendRecv($cmd, $args, $tmpFile)
+{
+    // only SENDMSG and RECVMSG
+    if ($cmd !== ITAC_SENDMSG && $cmd !== ITAC_RECVMSG) return false;
+    if (strpos($args, 'FROM') === 0){
+
+    } elseif (strpos($args, 'BY') === 0) {
+
+    } else {
+        return false;
+    }
+
+    // for SEND RECV types
+    file_put_contents($tmpFile,
+        sprintf("array('%s', '%s', '%s', '%s'),\n", $func, $from, $to, $len),
+        FILE_APPEND);
+    $duplex["$from-$to"] = null;
+    if (array_key_exists("$to-$from", $duplex)) {
+        $duplex["$to-$from"] = $to; // found duplex
+    }
+}
+
+function filterGlobalop($cmd, $args, $tmpFile, &$duplex)
+{
+    if ($cmd !== ITAC_GLOBALOP) return false;
+
+    if (strpos($args, 'MPI') === 0) {
+        // $from is ROOT, $to is ON
+
+        list($func,, $to,,,,$from,,$sent,,$recv) = explode(' ', $args);
+        if (strpos($to, '0:') === false) $to = '0:' . $to;
+        if (strpos($from, '0:') === false) $from = '0:' . $from;
+
+//        var_dump($func,$to,$from,$send,$recv);die;
+//        $pos = strpos($args, ' ');
+//        $func = substr($args, 0, $pos);
+//        $pos = strpos($args, 'ON ', $pos + 1);
+//        $to = substr($args, $pos + 3, strpos($args, ' ', $pos + 3) - $pos - 3);
+//        $pos = strpos($args, 'ROOT ', $pos + 3);
+//        $from = substr($args, $pos + 5, strpos($args, ' ', $pos + 5) - $pos - 5);
+//        $pos = stripos($args, 'SENT ', $pos + 5);
+//        $sent = substr($args, $pos + 5, strpos($args, ' ', $pos + 5) - $pos - 5);
+//        $pos = stripos($args, 'RECVD ', $pos + 5);
+//        $recv = substr($args, $pos + 6, strpos($args, ' ', $pos + 6) - $pos - 6);
+    } else {
+        return false;
+    }
+    $func = 'GLOBALOP';
+    if ($sent > 0) {
+        file_put_contents($tmpFile,
+            sprintf("array('%s', '%s', '%s', '%s'),\n", $func, $from, $to, $sent),
+            FILE_APPEND);
+    }
+    if ($recv > 0) {
+        file_put_contents($tmpFile,
+            sprintf("array('%s', '%s', '%s', '%s'),\n", $func, $to, $from, $recv),
+            FILE_APPEND);
+    }
+    $duplex["$from-$to"] = null;
+    if (array_key_exists("$to-$from", $duplex)) {
+        $duplex["$to-$from"] = $to; // found duplex
+    }
+}
+// /home/udigo/runs/zingorn/part2/002/64/d3_itt1Ec
+function full($options)
+{
+    $stfFile = $options['file'];
+    $totalDuration = $options['totalDuration'];
+    $opt = $options['opt'];
+    $filterMask = 2; // 1bit - send&recv; 2bit - globalop
+
+    $allowCmd = array(ITAC_RECVMSG, ITAC_SENDMSG, ITAC_GLOBALOP);
+    $duplex = array();
+
+    if (isset($opt['cache']) && file_exists($opt['cache'])) {
+        $data = require $opt['cache'];
+        var_dump(count($data));die;
+    } else {
+        // collect data
+        $p = createProcess($stfFile, '--convert -', $pipes);
+        $cLine = 0;
+        $from = $to = $len = $func = null;
+
+        $tmpFile = $options['cache'];
+        file_put_contents($tmpFile, sprintf("<?php\nreturn array('data' => array(\n"));
+        while ($line = stream_get_line($pipes[1], 0, "\n")) {
+            //if (preg_match('/^(\d+)\s+([^\s]+)\s+(.*)$/', $line, $l)) {
+            // list(,$time, $cmd, $args) = $l;
+            @list($time, $cmd, $args) = explode(' ', $line, 3);
+            $cLine++;
+            if($cLine % 100000 == 0) {
+                echo sprintf(chr(13) . '%.3f%%', round(100 * $time / $totalDuration, 3));
+                $cLine = 0;
+            }
+            if (strpos($cmd, ITAC_SENDMSG) === 0 || strpos($cmd, ITAC_RECVMSG) === 0 || strpos($cmd, ITAC_GLOBALOP) === 0) {
+                //if (in_array($cmd, $allowCmd)) {
+
+//                    if (preg_match('/FROM\s+([^\s]+)\s+TO\s+([^\s]+)\s+LEN\s+([^\s]+)\s+FUNCTION\s+(.*)$/', $args, $m)) {
+//                        // parse SEND message
+//                        list(,$from, $to, $len, $func) = $m;
+//                    } else if (preg_match('/BY\s+([^\s]+)\s+FROM\s+([^\s]+)\s+LEN\s+([^\s]+)\s+FUNCTION\s+(.*)$/', $args, $m)) {
+//                        // parse RECV message
+//                        list(,$from, $to, $len, $func) = $m;
+//                    } else if (preg_match('/([^\s]+)\s+ON\s+([^\s]+)\s+COM\s+[\^s]+\sROOT\s(\d+)\s+SENT\s+([-\d]+)\s+RECVD\s+([-\d]+)\s+DURATION\s+(\d+)$/', $args, $m)) {
+//                        // for COLLECT type
+//                        list(,$func, $to, $from, $send, $recv, $duration) = $m;
+//                        if ($send > 0) {
+//                            file_put_contents($tmpFile,
+//                                sprintf("array('%s', '%s', '%s', '%s'),\n", $func, $from, $to, $send),
+//                                FILE_APPEND);
+//                        }
+//                        if ($recv > 0) {
+//                            file_put_contents($tmpFile,
+//                                sprintf("array('%s', '%s', '%s', '%s'),\n", $func, $to, $from, $recv),
+//                                FILE_APPEND);
+//                        }
+//                        $dumpType = 2;
+//
+//                    }
+                    if ($filterMask & 1) filterSendRecv($cmd, $args, $tmpFile);
+                    if ($filterMask & 2) filterGlobalop($cmd, $args, $tmpFile, $duplex);
+              //  }
+            }
+        }
+
+        fclose($pipes[1]);
+        proc_close($p);
+        // we have array like ['1-2' => null, '2-3' => 2, ...], skip null-value
+        $duplex = array_filter($duplex, function($v){
+            return $v !== null;
+        });
+        file_put_contents($tmpFile, sprintf("),'duplex' => %s);\n", var_export($duplex, true)), FILE_APPEND);
+        $data = include $tmpFile;
+    }
+
+    // prepare data
+    saveFile(hydrate(normalize($data), $opt));
+}
+
+function createProcess($file, $cmd, &$pipes)
+{
+    // get stats
+    $cmd = sprintf('%s %s %s', ITAC_STFTOOL, $file, $cmd);
+    $cwd = getcwd();
+    $env = array();
+    $p = proc_open($cmd, array(
+        1 => array('pipe', 'w'),
+    ), $pipes, $cwd, $env);
+
+    if (!is_resource($p)) {
+        echo "Can't run stftool.\n";
+        exit(1);
+    }
+    return $p;
+}
+
+/**
+ * @param array $data
+ * @return void
+ */
+function saveFile($data)
+{
+    global $opt;
+
+    $template = file_get_contents(D3_WRAPPERS_PATH . 'radial' . D3_WRAPPER);
+
+    $outFile = isset($opt['out']) ? $opt['out'] : D3_WRAPPER . time();
+    file_put_contents($outFile . '.html', str_replace('%json%', json_encode($data), $template));
+}
+
+/**
+ * @param array $data
+ * @return array
+ */
+function hydrate($data)
+{
+    global $opt;
+    $out = array();
+    $funcName = $opt['func'];
+
+    $duplexList = $data['duplex'];
+    //foreach ($data['data'][$funcName] as $sender => $senderRow) {
+//var_dump($data['data'][$funcName]['_']['sort']);die;
+    foreach ($data['data'][$funcName]['_']['sort'] as $sender => $s) {
+        $senderRow = $data['data'][$funcName][$sender];
+        if ($sender == '_') continue;
+        foreach ($senderRow as $receiver => $receiverRow) {
+            if ($receiver == '_') continue;
+            if (!isset($out[$sender])) $out[$sender] = array('name' => $sender, 'label'=> 'node ' . $sender, 'imports' => array());
+            $duplex = (array_key_exists("$sender-$receiver", $duplexList) && $sender == $duplexList["$sender-$receiver"])
+                ? 1
+                : (array_key_exists("$receiver-$sender", $duplexList) && $sender == $duplexList["$receiver-$sender"])
+                    ? 2
+                    : 0;
+            $out[$sender]['imports'][] = array(
+                'name' => $receiver,
+                'stat' => $receiverRow,
+                'duplex' => $duplex
+            );
+        }
+    }
+
+    return array_values($out);
+}
+
+/**
+ * Data struct
+ * [
+ *  'blocks' => [
+ *      ...
+ *      // block #N
+ *      [
+ *          'funcName' => [
+ *              ...
+ *              'target_sender' =>
+ *                  ...
+ *                  [
+ *                   'destination_receiver' => ['cnt' =>, 'size' =>]
+ *                  ]
+ *              ]
+ *          ]
+ *      ]
+ *  ],
+ *  'functions' => [
+ *      'funcName'=> [
+ *          ...
+ *          'target_sender' =>
+ *              ...
+ *              [
+ *                  'destination_receiver' => ['cnt' =>, 'size' =>]
+ *              ]
+ *          ]
+ *      ]
+ *  ]
+ * @param array $data
+ * @return array
+ */
+function normalize($data)
+{
+    global $opt;
+
+    $out = array(
+        '_' => array('len' => 0),
+        'duplex' => $data['duplex'],
+    );
+    unset($data['duplex']);
+
+    $d = array();
+    foreach ($data['data'] as $i => $row) {
+        list($func, $from, $to, $len) = $row;
+        $func = str_replace('"', '', $func);
+
+        if (!isset($d[$func])) {
+            $d[$func] = array('_' => array('len' => 0, 'max' => $len), $from => array('_' => array('len' => 0), $to => array('len' => 0)));
+        } elseif (!isset($d[$func][$from])) {
+            $d[$func][$from] = array('_' => array('len' => 0), $to => array('len' => 0));
+        } elseif (!isset($d[$func][$from][$to])) $d[$func][$from][$to] = array('len' => 0);
+
+        $out['_']['len'] += $len;
+        $d[$func]['_']['len'] += $len;
+        $d[$func][$from]['_']['len'] += $len;
+        $d[$func][$from][$to]['len'] += $len;
+        unset($data[$i]);
+    }
+
+    $sort = array();
+    foreach ($d as $f => &$funcData) {
+        if ($f == '_') continue;
+        foreach ($funcData as $k => $fromData) {
+            if ($k == '_') continue;
+            $sort[$f][$k] = $fromData['_']['len'];
+            foreach ($fromData as $toData) {
+                if ($d[$f]['_']['max'] < $toData['len']) $d[$f]['_']['max'] = $toData['len'];
+            }
+        }
+        arsort($sort[$f]);
+    }
+
+    $out['data'] = array();
+
+    foreach ($d as $f => &$funcData) {
+        if ($f == '_') continue;
+        foreach ($funcData as $k => &$fromData) {
+            if ($k == '_') {
+                $funcData['_']['sort'] = $sort[$f];
+                continue;
+            }
+            foreach ($fromData as $t => &$toData) {
+                if ($t == '_') continue;
+                $toData['pFunc'] = round(100 * $toData['len'] / $funcData['_']['len'], 3);
+                $toData['pTotal'] = round(100 * $toData['len'] / $out['_']['len'], 3);
+                $toData['pMax'] = round(100 * $toData['len'] / $funcData['_']['max'], 3);
+            }
+        }
+    }
+
+    unset($sort);
+    $out['data'] = $d;
+    return $out;
+}

@@ -1,0 +1,232 @@
+#!/bin/env php
+<?php
+define('ITAC_STFTOOL', '/common/intel/itac/8.1.4.045/bin/xstftool');
+define('D3_WRAPPERS_PATH', '/home/udigo/runs/bin/d3/');
+define('D3_WRAPPER', 'radial.d3wrapper.html');
+define('MPI_FUNC', 'MPI:MPI_Recv');
+define('ITAC_SENDMSG', 'SENDMSG');
+define('ITAC_RECVMSG', 'RECVMSG');
+
+$opt = getopt('f:o::', array(
+    'stats',
+    'full'
+));
+
+if (count($opt) < 2) {
+    echo sprintf("Usage d3convert <options>\n");
+    exit(1);
+}
+if (!isset($opt['f'])) {
+    echo sprintf("File not specified.\n");
+    exit(1);
+}
+
+
+$stfFile = $opt['f'];
+$stfParam = 'size';
+
+// get functions
+$head = shell_exec(sprintf('%s %s --print-statistics --convert - 2>/dev/null', ITAC_STFTOOL, $stfFile));
+
+$head = array_filter(explode("\n", $head));
+$funcs = array();
+$totalDuration = 0;
+
+foreach ($head as $h) {
+    if (preg_match('/^DURATION\s+\d+\s+(\d+)/', $h, $m)) {
+        //'3559194624000'
+        $totalDuration = $m[1];
+        continue;
+    }
+    if (!preg_match('/(\d+)[^"]+\"([^"]+)/', $h, $m)) continue;
+    $funcs[$m[2]] = $m[1];
+    $funcs[$m[1]] = $m[2];
+}
+$mpiFunc = $funcs[MPI_FUNC];
+
+if (isset($opt['stats'])) {
+    $p = createProcess($stfFile, '--print-statistics', $pipes);
+    $stats = array(
+        'TIMING' => array(),
+        'ONE2ONE_PROFILE' => array()
+    );
+    $data = array();
+    while ($line = stream_get_line($pipes[1], 0, "\n")) {
+        if (substr($line, 0, 1) === '#') continue;
+        if (!preg_match('/ONE2ONE_PROFILE\s+(.*)$/', $line, $m)) continue;
+
+        list($sender, $receiver, $senderFunc, $receiverFunc, , , $size, $count, $min_time, $max_time, $total_time) = explode(':', $m[1]);
+
+//	var_dump($line,$sender, $receiver,$size, $count, $min_time, $max_time, $total_time);die;
+        if (!in_array($mpiFunc, array($senderFunc, $receiverFunc))) continue;
+        /*        if ($senderFunc === $mpiFunc) {
+        //	    $stats['ONE2ONE_PROFILE'][$sender] = array('name' => $sender, 'imports' => );
+            } else {
+                $stats['ONE2ONE_PROFILE'][$] = array('name' => $sender, 'imports' => );
+            }*/
+        if (!isset($stats['ONE2ONE_PROFILE'][$sender])) $stats['ONE2ONE_PROFILE'][$sender] = array('name' => $sender, 'imports' => array());
+        if (!in_array($receiver, $stats['ONE2ONE_PROFILE'][$sender]['imports'])) {
+            $stats['ONE2ONE_PROFILE'][$sender]['imports'][] = $receiver;
+        }
+//	
+    }
+    fclose($pipes[1]);
+    proc_close($p);
+    $data = array_values($stats['ONE2ONE_PROFILE']);
+    saveFile($data);
+}
+
+$st = array('from' => array(), 'func' => array(), 'to' => array());
+if (isset($opt['full'])) {
+    $allowCmd = array(ITAC_RECVMSG, ITAC_SENDMSG);
+    $duplex = array();
+
+    if (file_exists('.d3convert.cache')) {
+        $data = json_decode(file_get_contents('.d3convert.cache'), true);
+    } else {
+        $data = array('_statistic' => array('len' => 0, 'count' => 0));
+        $p = createProcess($stfFile, '--convert -', $pipes);
+        $from = $to = $len = $func = null;
+        while ($line = stream_get_line($pipes[1], 0, "\n")) {
+            if (preg_match('/^(\d+)\s+([^\s]+)\s+(.*)$/', $line, $l)) {
+                list(,$time, $cmd, $args) = $l;
+                echo sprintf(chr(13) . '%3s%%', ceil(100 * $time / $totalDuration));
+
+                if (in_array($cmd, $allowCmd)) {
+                    // parse SEND message
+                    if (preg_match('/FROM\s+([^\s]+)\s+TO\s+([^\s]+)\s+LEN\s+([^\s]+)\s+FUNCTION\s+(.*)$/', $args, $m)) {
+                        list(,$from, $to, $len, $func) = $m;
+                    }
+                    // parse RECV message
+                    if (preg_match('/BY\s+([^\s]+)\s+FROM\s+([^\s]+)\s+LEN\s+([^\s]+)\s+FUNCTION\s+(.*)$/', $args, $m)) {
+                        list(,$from, $to, $len, $func) = $m;
+                    }
+
+                    $func = str_replace('"', '', $func);
+                    if (!isset($data[$func])) $data[$func] = array();
+                    if (!isset($data[$func][$from])) $data[$func][$from] = array();
+                    if (!isset($data[$func][$from][$to])) $data[$func][$from][$to] = array(
+                        'len' => 0,
+                        'count' => 0
+                    );
+
+                    $data[$func][$from][$to]['count']++;
+                    $data[$func][$from][$to]['len'] += $len;
+                    if ($data['_statistic']['count'] < $data[$func][$from][$to]['count']) {
+                        $data['_statistic']['count'] = $data[$func][$from][$to]['count'];
+                    }
+                    if ($data['_statistic']['len'] < $data[$func][$from][$to]['len']) {
+                        $data['_statistic']['len'] = $data[$func][$from][$to]['len'];
+                    }
+                    $duplex["$from-$to"] = null;
+                    if (array_key_exists("$to-$from", $duplex)) {
+                        $duplex["$to-$from"] = $to;
+                    }
+                }
+            }
+        }
+
+        $data['_statistic']['duplex'] = array_keys(array_filter($duplex, function($v){
+            return $v !== null;
+        }));
+        file_put_contents('.d3convert.cache', json_encode($data));
+
+        fclose($pipes[1]);
+        proc_close($p);
+    }
+
+    // prepare data
+    saveFile(hydrate(normalize($data)));
+}
+
+exit(0);
+
+
+function createProcess($file, $cmd, &$pipes)
+{
+    // get stats
+    $cmd = sprintf('%s %s %s', ITAC_STFTOOL, $file, $cmd);
+    $cwd = getcwd();
+    $env = array();
+    $p = proc_open($cmd, array(
+        1 => array('pipe', 'w'),
+    ), $pipes, $cwd, $env);
+
+    if (!is_resource($p)) {
+        echo "Can't run stftool.\n";
+        exit(1);
+    }
+    return $p;
+}
+
+function saveFile($data)
+{
+    global $opt;
+
+    $template = file_get_contents(D3_WRAPPERS_PATH . D3_WRAPPER);
+    $outFile = isset($opt['o']) ? $opt['o'] : D3_WRAPPER . time();
+    file_put_contents($outFile . '.html', str_replace('%json%', json_encode($data), $template));
+}
+
+function hydrate($data)
+{
+    $out = array();
+    if (!isset($data[MPI_FUNC])) return $out;
+
+    foreach ($data[MPI_FUNC] as $sender => $senderRow) {
+        foreach ($senderRow as $receiver => $receiverRow) {
+            if (!isset($out[$sender])) $out[$sender] = array('name' => $sender, 'imports' => array());
+            $out[$sender]['imports'][] = array(
+                'name' => $receiver,
+                'stat' => $receiverRow
+            );
+        }
+    }
+
+    return array_values($out);
+}
+
+/**
+ * Data struct
+ * [
+ *   'func'=> [
+ *      ...
+ *      'target_sender' =>
+ *          ...
+ *          [
+ *              'destination_receiver' => ['cnt' =>, 'size' =>]
+ *          ]
+ *      ]
+ * ]
+ * @param array $data
+ * @return array
+ */
+function normalize($data)
+{
+    $maxLen = $data['_statistic']['len'];
+    $maxCount = $data['_statistic']['count'];
+    $duplexList = $data['_statistic']['duplex'];
+
+    $out = array();
+    foreach ($data as $funcName => $func) {
+        if (substr($funcName, 0, 1) === '_') continue;
+        if (!isset($out[$funcName]))  $out[$funcName] = array();
+        foreach ($func as $sender => $senderRow) {
+            if (!isset($out[$funcName][$sender]))  $out[$funcName][$sender] = array();
+            foreach ($senderRow as $receiver => $receiverRow) {
+                $duplex = (array_key_exists("$sender-$receiver", $duplexList) && $sender == $duplexList["$sender-$receiver"])
+                    ? 1
+                    : (array_key_exists("$receiver-$sender", $duplexList) && $sender == $duplexList["$receiver-$sender"])
+                        ? 2
+                        : 0;
+                $out[$funcName][$sender][$receiver] = array(
+                    'count' => round(100 * $receiverRow['count'] / $maxCount, 3),
+                    'len' => round(100 * $receiverRow['len'] / $maxLen, 3),
+                    'duplex' => $duplex
+                );
+            }
+        }
+    }
+
+    return $out;
+}
