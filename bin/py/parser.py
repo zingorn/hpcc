@@ -227,9 +227,9 @@ class Parser:
             else:
                 duplex = 0
 
-        if hasattr(self.options, 'percent') and self.options.percent is not None \
-                and self.groups['data'][sender][recver]['pMax'] < float(self.options.percent):
-            return None
+        # if hasattr(self.options, 'percent') and self.options.percent is not None \
+        #         and self.groups['data'][sender][recver]['pMax'] < float(self.options.percent):
+        #     return None
 
         return {
             'name': recver,
@@ -252,8 +252,7 @@ class Parser:
         return out_data.values()
 
     def get_smart_order_data(self):
-        # normalize
-
+        # normalize group
         for sender in self.groups['data']:
             for receiver in self.groups['data'][sender]:
                 p_max = round(100 * self.groups['data'][sender][receiver]['len'] / self.groups['max'], 3)
@@ -272,7 +271,10 @@ class Parser:
 
         out = []
         for o in self.groups['order']:
-            out.append(out_data[o])
+            if o in out_data:
+                out.append(out_data[o])
+            else:
+                out.append({'name': o, 'label': o, 'imports': []})
         return out
 
     def get_order_data(self):
@@ -358,8 +360,16 @@ class Parser:
         group_duplex = {}
         max_len = 0
 
+        # filter data
+        self.lengthStat.normalize()
+
         for sender in self.lengthStat.data:
             for recver in self.lengthStat.data[sender]:
+
+                if hasattr(self.options, 'percent') and self.options.percent is not None \
+                        and self.lengthStat.data[sender][recver]['pMax'] < float(self.options.percent):
+                    continue
+
                 sender_group = self.groups['nodes'][sender]
                 recver_group = self.groups['nodes'][recver]
 
@@ -377,6 +387,7 @@ class Parser:
                 group_duplex[sender_group + '-' + recver_group] = None
                 if recver_group + '-' + sender_group in group_duplex:
                     group_duplex[recver_group + '-' + sender_group] = recver_group
+
         self.groups['data'] = group_data
         self.groups['max'] = max_len
 
