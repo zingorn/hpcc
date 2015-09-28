@@ -231,7 +231,6 @@ class Parser:
                 and self.groups['data'][sender][recver]['pMax'] < float(self.options.percent):
             return None
 
-        print sender, recver, self.groups['data'][sender][recver]['pMax']
         return {
             'name': recver,
             'stat': self.groups['data'][sender][recver],
