@@ -109,11 +109,10 @@
         var l = [];
         for (var i = 0; i < d.imports.length;i++) {
             var t = d.imports[i];
-            console.log(t)
             l.push('<b>' + t.name + '</b> ' + t.stat['pMax']);
         }
-        data.html('<b>' + d.name + '</b><br/><ul></ul>' +
-                l.join('</li><li>') + '</ul>');
+        data.html('<b>' + d.name + '</b><br/><ul><li>' +
+                l.join('</li><li>') + '</li></ul>');
 
         node
                 .each(function(n) { n.target = n.source = false; });
