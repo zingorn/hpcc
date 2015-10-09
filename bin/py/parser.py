@@ -353,7 +353,10 @@ class Parser:
         self.parse()
         self.to_print()
 
-    def smart_order(self):
+    def smart_order2(self):
+        return self.smart_order(True)
+
+    def smart_order(self, no_duplex=False):
         self.read_groups(self.options.smart_order)
         self.parse()
         group_data = {}
@@ -391,7 +394,7 @@ class Parser:
         self.groups['data'] = group_data
         self.groups['max'] = max_len
 
-        self.groups['duplex'] = group_duplex
+        self.groups['duplex'] = [] if no_duplex else group_duplex
         self.to_print()
 
     def matrix(self):
